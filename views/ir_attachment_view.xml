@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <!-- Inherit the form view of ir.attachment to show the Firebase URL -->
+        <record id="ir_attachment_view_form_inherit_firebase" model="ir.ui.view">
+            <field name="name">ir.attachment.form.inherit.firebase</field>
+            <field name="model">ir.attachment</field>
+            <field name="inherit_id" ref="base.view_attachment_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//field[@name='mimetype']" position="after">
+                    <field name="firebase_url" widget="url" readonly="1"
+                           attrs="{'invisible': [('firebase_url', '=', False)]}"/>
+                </xpath>
+            </field>
+        </record>
+
+    </data>
+</odoo>
