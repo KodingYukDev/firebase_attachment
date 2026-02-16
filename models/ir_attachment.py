@@ -5,7 +5,7 @@ import requests
 import os
 import re
 import json
-import uuid  # Digunakan untuk generate nama file unik
+import uuid
 
 from odoo import api, fields, models, _, tools
 from odoo.exceptions import UserError
@@ -71,31 +71,37 @@ class IrAttachment(models.Model):
         return storage.bucket(app=app) if app else None
 
     def _get_firebase_blob_name(self, attachment):
-        """ Menghasilkan path unik dengan UUID agar tidak perlu ID Odoo saat upload """
+        """ Menghasilkan path unik dengan UUID """
         db_name = self.env.cr.dbname
-        # Mengambil ekstensi file asli
         extension = os.path.splitext(attachment.name)[1] if attachment.name else ''
-        # Generate UUID random
         random_name = f"{uuid.uuid4()}{extension}"
         return f'{db_name}/uploads/{random_name}'
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        """ Pastikan proses upload dipicu saat pembuatan record baru """
+        attachments = super(IrAttachment, self).create(vals_list)
+        if self._should_use_firebase():
+            for attachment in attachments:
+                if attachment.datas:
+                    attachment._inverse_datas()
+        return attachments
+
     def _inverse_datas(self):
-        """ 
-        Mencegat penyimpanan data agar langsung ke Firebase 
-        dan mengosongkan kolom database Postgres.
-        """
+        """ Bypass storage Postgres dan upload langsung ke Firebase """
         if not self._should_use_firebase():
             return super()._inverse_datas()
 
         bucket = self._get_firebase_bucket()
         if not bucket:
-            raise UserError(_("Firebase tidak terkonfigurasi dengan benar."))
+            _logger.error("Firebase Bucket tidak ditemukan saat mencoba upload.")
+            return super()._inverse_datas()
 
         for attachment in self:
             if not attachment.datas:
                 continue
 
-            # Ambil data mentah
+            # Decode data mentah
             file_content = base64.b64decode(attachment.datas)
             blob_name = self._get_firebase_blob_name(attachment)
             blob = bucket.blob(blob_name)
@@ -107,14 +113,14 @@ class IrAttachment(models.Model):
                     content_type=attachment.mimetype or 'application/octet-stream'
                 )
                 
-                # Membuat file dapat diakses publik (Opsional, tergantung setting bucket)
+                # Mendapatkan URL Publik
                 try:
                     blob.make_public()
                     public_url = blob.public_url
-                except:
+                except Exception:
                     public_url = f"https://storage.googleapis.com/{bucket.name}/{blob_name}"
 
-                # Update via SQL untuk bypass penyimpanan file di Postgres
+                # Update SQL untuk membersihkan kolom database
                 self.env.cr.execute("""
                     UPDATE ir_attachment
                     SET firebase_url = %s, 
@@ -126,22 +132,21 @@ class IrAttachment(models.Model):
                     WHERE id = %s
                 """, (blob_name, public_url, len(file_content), attachment.id))
 
-                # Hapus dari cache agar Odoo membaca data URL yang baru
+                # Invalidate cache
                 attachment.invalidate_recordset(['datas', 'db_datas', 'store_fname', 'type', 'url'])
-                _logger.info("Berhasil upload ke Firebase: %s", blob_name)
+                _logger.info("Upload Berhasil ke Firebase: %s (ID: %s)", blob_name, attachment.id)
 
             except Exception as e:
-                _logger.error("Upload Gagal: %s", e)
-                raise UserError(_("Gagal mengunggah file ke Firebase: %s") % e)
+                _logger.error("Firebase Upload FAILED: %s", e)
+                raise UserError(_("Gagal mengunggah ke Firebase: %s") % e)
 
     def _compute_datas(self):
-        """ Mengambil data dari Firebase saat file dibuka di Odoo """
+        """ Mengunduh data dari Firebase saat dibutuhkan untuk ditampilkan """
         firebase_rec = self.filtered(lambda a: a.type == 'url' and a.firebase_url)
         other_rec = self - firebase_rec
 
         for attachment in firebase_rec:
             try:
-                # Ambil dari URL publik
                 response = requests.get(attachment.url, timeout=20)
                 if response.status_code == 200:
                     attachment.datas = base64.b64encode(response.content)
@@ -154,7 +159,7 @@ class IrAttachment(models.Model):
             super(IrAttachment, other_rec)._compute_datas()
 
     def unlink(self):
-        """ Hapus file di Firebase saat record di Odoo dihapus """
+        """ Hapus file di Firebase saat record dihapus """
         bucket = self._get_firebase_bucket()
         if bucket:
             for attachment in self.filtered('firebase_url'):
@@ -162,6 +167,7 @@ class IrAttachment(models.Model):
                     blob = bucket.blob(attachment.firebase_url)
                     if blob.exists():
                         blob.delete()
+                        _logger.info("Berhasil menghapus blob Firebase: %s", attachment.firebase_url)
                 except Exception as e:
-                    _logger.error("Gagal hapus blob di Firebase: %s", e)
+                    _logger.error("Gagal menghapus blob Firebase: %s", e)
         return super().unlink()
