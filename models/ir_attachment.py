@@ -56,10 +56,16 @@ def get_firebase_app(env):
             else:
                 storage_bucket = clean_bucket
             
-            _firebase_app = firebase_admin.initialize_app(cred, {
-                'storageBucket': storage_bucket
-            })
-            _logger.info("Firebase Berhasil Diinisialisasi dengan bucket: %s", storage_bucket)
+            # Cek jika app sudah ada
+            try:
+                _firebase_app = firebase_admin.get_app()
+                _logger.info("Firebase App sudah ada, menggunakan app yang ada dengan bucket: %s", storage_bucket)
+            except ValueError:
+                # App belum ada, inisialisasi baru
+                _firebase_app = firebase_admin.initialize_app(cred, {
+                    'storageBucket': storage_bucket
+                })
+                _logger.info("Firebase Berhasil Diinisialisasi dengan bucket: %s", storage_bucket)
         except Exception as e:
             _logger.error("Gagal Inisialisasi Firebase: %s", e)
             _firebase_app = None
